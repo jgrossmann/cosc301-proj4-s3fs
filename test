@@ -1,0 +1,13 @@
+#include <stdio.h>
+
+typedef struct {
+
+	int a;
+} test_struct;
+
+int main(void) {
+	test_struct b = new test_struct;
+	b.a = 1;
+	print("%d\n",b.a);
+	return 0;
+}

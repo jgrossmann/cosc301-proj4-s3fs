@@ -207,7 +207,7 @@ int fs_mkdir(const char *path, mode_t mode) {
 	printf("in between strncpys\n");
 	strncpy(new_dir.name, base_name,sizeof(char)*strlen(base_name)); new_dir.type = 'D'; new_dir.num_entries = 0;
 	printf("after second strncpy\n");
-	meta.st_size = sizeof(*new_dir_self);
+	meta.st_size = sizeof(new_dir_self);
 	printf("size of new dir: %d\n", meta.st_size);
 	printf("same line as metadata assign\n");new_dir_self->metadata = meta;
 	printf("right before realloc\n");

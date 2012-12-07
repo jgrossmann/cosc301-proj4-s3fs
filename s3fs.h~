@@ -37,7 +37,7 @@ typedef struct {
 	char name[1024];
 	int num_entries;
 	unsigned char type;
-	struct stat metadata;
+	struct stat *metadata;
 } s3dirent_t;
 
 // store filesystem state information in this struct
