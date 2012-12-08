@@ -177,6 +177,7 @@ int fs_mkdir(const char *path, mode_t mode) {
 	if(s3fs_get_object(ctx->s3bucket, temp_path3, &temp, 0, 0) >= 0) {
 		fprintf(stderr, "Directory name already exists");
 		free(temp); free(temp_path1); free(temp_path2); free(temp_path3);
+		free(dir_name); free(base_name);
 		return -EEXIST;
 	}
 	free(temp);
@@ -185,8 +186,8 @@ int fs_mkdir(const char *path, mode_t mode) {
 	struct stat meta;
 	if((directory_size = s3fs_get_object(ctx->s3bucket, dir_name, &directory, 0, 0)) < 0) {
 		fprintf(stderr, "Could not find parent directory: fs_mkdir");
-		free(temp_path1); free(temp_path2); free(temp_path3);
-		return -1;
+		free(temp_path1); free(temp_path2); free(temp_path3); free(base_name); free(dir_name);
+		return -ENOENT;
 	}
 	s3dirent_t *dir_update = (s3dirent_t*)directory;
 	printf("PAST GET PARENT DIRECTORY IN MKDIR CHECK\n\n");
@@ -205,30 +206,38 @@ int fs_mkdir(const char *path, mode_t mode) {
 	printf("before strcpy\n");
 	strcpy(new_dir_self->name, "."); printf("after strcpy on same line\n");new_dir_self->type = 'D'; new_dir_self->num_entries = 1;
 	printf("in between strncpys\n");
-	strncpy(new_dir.name, base_name,sizeof(char)*strlen(base_name)); new_dir.type = 'D'; new_dir.num_entries = 0;
+	strcpy(new_dir.name,base_name); new_dir.type = 'D'; new_dir.num_entries = 0;
+	printf("new_dir name: %s \n",new_dir.name);
 	printf("after second strncpy\n");
-	meta.st_size = sizeof(new_dir_self);
+	meta.st_size = sizeof(*new_dir_self);
 	printf("size of new dir: %d\n", meta.st_size);
 	printf("same line as metadata assign\n");new_dir_self->metadata = meta;
 	printf("right before realloc\n");
 	dir_update=realloc(dir_update, directory_size + sizeof(new_dir));
 	printf("after realloc\n");
 	printf("right before array index input\n");
+	printf("dir_update size then index: %d, %d\n",directory_size + sizeof(new_dir),directory_size/sizeof(s3dirent_t));
 	dir_update[directory_size/sizeof(s3dirent_t)] = new_dir;
 	ssize_t dir_update_size = directory_size + sizeof(s3dirent_t);
+	dir_update[0].metadata.st_size = (off_t)dir_update_size;
 	printf("right before put back updated directory\n");
-	if(s3fs_put_object(ctx->s3bucket, dir_name, (uint8_t *) dir_update, dir_update_size) != dir_update_size) {
+	printf("updated directory path: %s \n",dir_name);
+	if(s3fs_put_object(ctx->s3bucket, dir_name, (uint8_t *)dir_update, dir_update_size) != dir_update_size) {
 		fprintf(stderr, "OBJECT DID NOT TRANSFER CORRECTLY: fs_mkdir");
-		free(temp_path1); free(temp_path2); free(temp_path3); free(new_dir_self); free(dir_update);free(directory);
-		return -1;
+		free(temp_path1); free(temp_path2); free(temp_path3); free(new_dir_self); free(dir_update);
+		free(base_name); free(dir_name);
+		return -EIO;
 	}
 	printf("after updated directory put, before new directory put\n");
+	printf("new directory path: %s \n", path);
 	if(s3fs_put_object(ctx->s3bucket, path, (uint8_t *)new_dir_self, sizeof(s3dirent_t)) != sizeof(s3dirent_t)) {
 		fprintf(stderr, "OBJECT DID NOT TRANSFER CORRECTLY: fs_mkdir");
-		free(temp_path1); free(temp_path2); free(temp_path3); free(new_dir_self); free(dir_update);free(directory);
-		return -1;
+		free(temp_path1); free(temp_path2); free(temp_path3); free(new_dir_self); free(dir_update);
+		free(base_name); free(dir_name);
+		return -EIO;
 	}
 	printf("FINISHED MKDIR\n\n");
+	free(base_name); free(dir_name);
 	free(dir_update);free(temp_path1); free(temp_path2); free(temp_path3); free(new_dir_self);
     return 0;
 }
@@ -294,7 +303,7 @@ int fs_rmdir(const char *path) {
 	ssize_t dir_size;
 	if((dir_size = s3fs_get_object(ctx->s3bucket, temp_path2, &dir, 0, 0)) < 0){
 		fprintf(stderr, "INVALID DIRECTORY: fs_rmdir\n");
-		free(dir); free(temp_path); free(temp_path1); free(temp_path2);free(dir_name); free(base_name);
+		free(temp_path); free(temp_path1); free(temp_path2);free(dir_name); free(base_name);
 		return -ENOENT;
 	}
 	printf("after getting dir to remove\n");
@@ -578,7 +587,12 @@ int fs_write(const char *path, const char *buf, size_t size, off_t offset, struc
 	}
 	printf("after grabbed directory to update entry size meta\n");
 	s3dirent_t *update_file_entry = (s3dirent_t *)file_entry;
-	update_file_entry->metadata.st_size = new_size;
+	printf("update size: %d\n",new_size);
+	for(;i<file_entry_size/sizeof(s3dirent_t);i++) {
+		if(!strcmp(update_file_entry[i].name, base_name)) {
+			update_file_entry[i].metadata.st_size = new_size;
+		}
+	}
 	if(s3fs_put_object(ctx->s3bucket, path, (uint8_t *)update_file_entry, file_entry_size)!=file_entry_size) {
 		fprintf(stderr, "COULD NOT PUT UPDATED DIRECTORY ENTRY BACK: fs_write\n");
 		free(dir_name); free(base_name); free(update_file_entry);
@@ -645,7 +659,6 @@ int fs_opendir(const char *path, struct fuse_file_info *fi) {
 	uint8_t *dir;
 	if(s3fs_get_object(ctx->s3bucket, path, &dir, 0,0) < 0) {
 		fprintf(stderr, "CANNOT ACCESS DIRECTORY: fs_opendir fail\n");
-		free(dir);
 		return -EIO;
 	}
 	free(dir);
@@ -662,26 +675,27 @@ int fs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset
     fprintf(stderr, "fs_readdir(path=\"%s\", buf=%p, offset=%d)\n",
 	        path, buf, (int)offset);
     s3context_t *ctx = GET_PRIVATE_DATA;
-	char* temp_path = path;
-	uint8_t * dir = NULL;
+	char* temp_path = strdup(path);
+	uint8_t *dir = NULL;
 	ssize_t dir_size = NULL;
 	if((dir_size = s3fs_get_object(ctx->s3bucket, temp_path, &dir, 0,0))<0) {
 		fprintf(stderr, "CANNOT READ FILE: fs_readdir\n");
-		free(dir); return -EIO;
+		free(temp_path);
+		return -EIO;
 	}
 	s3dirent_t *directory = (s3dirent_t *)dir;
-	if(strcmp(directory[0].name,".") || directory[0].type != 'D') {
+	if(directory[0].type != 'D') {
 		fprintf(stderr, "NOT A DIRECTORY!:fs_readdir\n");
-		free(dir); return -EIO;
+		free(directory); free(temp_path);return -EIO;
 	}
 	int numdirent = dir_size/sizeof(s3dirent_t), i = 0;
 	for(;i<numdirent;i++) {
 		if(filler(buf, directory[i].name, NULL, 0) != 0) {
-			free(directory);
+			free(directory);free(temp_path);
 			return -ENOMEM;
 		}
 	}
-	free(directory);
+	free(directory); free(temp_path);
 
     return 0;
 }
@@ -728,8 +742,8 @@ void *fs_init(struct fuse_conn_info *conn)
 	gettimeofday(&tv, NULL);
 	the_time = tv.tv_sec;
 	meta.st_atime = the_time; meta.st_mtime = the_time; meta.st_ctime = the_time;
-	strncpy(root.name, ".", sizeof(".")); root.num_entries = 1; root.type = 'D';
-	root.metadata = meta;
+	strcpy(root.name, "."); root.num_entries = 1; root.type = 'D';
+	root.metadata = meta; root.metadata.st_size = sizeof(s3dirent_t);
 	printf("ROOT PERMISSIONS: %o\n",root.metadata.st_mode);
 	if(s3fs_put_object(ctx->s3bucket, "/", (uint8_t *)&root, sizeof(root)) != sizeof(root)) {
 		fprintf(stderr, "PUT OBJECT FAILED IN FS_INIT");
