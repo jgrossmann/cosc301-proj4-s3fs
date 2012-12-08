@@ -1,5 +1,5 @@
-/* This code is based on the fine code written by Joseph Pfeiffer for his
-   fuse system tutorial. */
+/* John Grossmann and Thomas Charron
+	Did not have time to comment it sufficiently, however there are some nifty print statements.*/
 
 #include "s3fs.h"
 #include "libs3_wrapper.h"
@@ -462,7 +462,52 @@ int fs_chown(const char *path, uid_t uid, gid_t gid) {
 int fs_truncate(const char *path, off_t newsize) {
     fprintf(stderr, "fs_truncate(path=\"%s\", newsize=%d)\n", path, (int)newsize);
     s3context_t *ctx = GET_PRIVATE_DATA;
-    return -EIO;
+	uint8_t *dir = NULL;
+	char *temp_path = strdup(path), *temp_path1 = strdup(path);
+	char *dir_name = strdup(dirname(temp_path)), *base_name = strdup(basename(temp_path1));
+	free(temp_path); free(temp_path1);
+	if(s3fs_get_object(ctx->s3bucket, path, &dir, 0, 0)<0) {
+		fprintf(stderr, "INVALID PATH: fs_truncate\n");
+		free(base_name); free(dir_name);
+		return -ENOENT;
+	}
+	char *file = (char *)dir;
+	file = realloc(file, 0);
+	/*if(s3fs_remove_object(ctx->s3bucket, path)!=0) {
+		fprintf(stderr, "error removing object\n");
+		free(base_name); free(dir_name);
+		return -EIO;
+	}*/
+	if(s3fs_put_object(ctx->s3bucket, path, file, 0) != 0) {
+		fprintf(stderr, "error putting on truncated file\n");
+		free(base_name); free(dir_name);
+		return -EIO;
+	}
+	free(file);
+	uint8_t *dir1 = NULL;
+	ssize_t dir_size;
+	if((dir_size=s3fs_get_object(ctx->s3bucket, dir_name, &dir1, 0, 0))< 0) {
+		fprintf(stderr, "ERROR PULLING PARENT DIRECTORY\n");
+		free(base_name); free(dir_name);
+		return -EIO;
+	}
+	s3dirent_t *dirent = (s3dirent_t *)dir1;
+	int i = 0;
+	for(;i<dir_size/sizeof(s3dirent_t);i++) {
+		if(!strcmp(base_name, dirent[i].name)) {
+			dirent[i].metadata.st_size = 0;
+			printf("size of file in directory: %d\n", dirent[i].metadata.st_size);
+			break;
+		}
+	}
+	printf("new size of parent directory: %d\n",sizeof(*dirent));
+	if(s3fs_put_object(ctx->s3bucket, dir_name, (uint8_t*)dirent, sizeof(*dirent))!=sizeof(*dirent)) {
+		fprintf(stderr, "Error putting object back: fs_truncate\n");
+		free(dirent);free(dir_name); free(base_name);
+		return -EIO;
+	}
+    free(dirent); free(dir_name); free(base_name);
+	return 0;
 }
 
 /*
@@ -564,7 +609,7 @@ int fs_write(const char *path, const char *buf, size_t size, off_t offset, struc
 	printf("strdup file data\n");
 	if(file_size <= offset + size) {
 		new_size = offset + size - file_size;
-		file_data = realloc(file_data, new_size);
+		file_data = realloc(file_data, sizeof(char)*new_size);
 	}else {
 		new_size = file_size;
 	}
@@ -574,6 +619,10 @@ int fs_write(const char *path, const char *buf, size_t size, off_t offset, struc
 		file_data[i] = buf[i];
 	}
 	printf("after transfering data\n");
+	if(s3fs_remove_object(ctx->s3bucket, path)!=0) {
+		fprintf(stderr, "object not removed correctly\n");
+		free(file_data); return -EIO;
+	}
 	if(s3fs_put_object(ctx->s3bucket, path, (uint8_t *)file_data, new_size) != new_size) {
 		fprintf(stderr,"WRITTEN FILE DID NOT PUT BACK CORRECTLY: fs_write\n");
 		free(file_data);
@@ -583,7 +632,7 @@ int fs_write(const char *path, const char *buf, size_t size, off_t offset, struc
 	uint8_t *file_entry = NULL;
 	ssize_t file_entry_size;
 	char *temp_path = strdup(path), *temp_path1 = strdup(path);
-	char *dir_name = strdup(dirname(temp_path)), *base_name = strdup(basename(base_name));
+	char *dir_name = strdup(dirname(temp_path)), *base_name = strdup(basename(temp_path1));
 	free(temp_path); free(temp_path1);
 	if((file_entry_size = s3fs_get_object(ctx->s3bucket, dir_name, &file_entry, 0, 0))< 0) {
 		fprintf(stderr, "COULD NOT UPDATE FILE ENTRY AFTER WRITE: fs_write\n");
@@ -593,12 +642,20 @@ int fs_write(const char *path, const char *buf, size_t size, off_t offset, struc
 	printf("after grabbed directory to update entry size meta\n");
 	s3dirent_t *update_file_entry = (s3dirent_t *)file_entry;
 	printf("update size: %d\n",new_size);
-	for(;i<file_entry_size/sizeof(s3dirent_t);i++) {
+	printf("base name: %s\n",base_name);
+	for(i=0;i<file_entry_size/sizeof(s3dirent_t);i++) {
+		printf("directory entry names: %s\n",update_file_entry[i].name);
 		if(!strcmp(update_file_entry[i].name, base_name)) {
 			update_file_entry[i].metadata.st_size = new_size;
+			printf("st_size of direct entry: %d \n",update_file_entry[i].metadata.st_size);
 		}
 	}
-	if(s3fs_put_object(ctx->s3bucket, path, (uint8_t *)update_file_entry, file_entry_size)!=file_entry_size) {
+	if(s3fs_remove_object(ctx->s3bucket, dir_name)!=0) {
+		fprintf(stderr,"could not remove object\n");
+		free(dir_name); free(base_name);free(update_file_entry);
+		return -EIO;
+	}
+	if(s3fs_put_object(ctx->s3bucket, dir_name, (uint8_t *)update_file_entry, file_entry_size)!=file_entry_size) {
 		fprintf(stderr, "COULD NOT PUT UPDATED DIRECTORY ENTRY BACK: fs_write\n");
 		free(dir_name); free(base_name); free(update_file_entry);
 		return -EIO;
@@ -620,7 +677,7 @@ int fs_write(const char *path, const char *buf, size_t size, off_t offset, struc
 int fs_flush(const char *path, struct fuse_file_info *fi) {
     fprintf(stderr, "fs_flush(path=\"%s\", fi=%p)\n", path, fi);
     s3context_t *ctx = GET_PRIVATE_DATA;
-    return -EIO;
+    return 0;
 }
 
 /*
@@ -775,6 +832,39 @@ void fs_destroy(void *userdata) {
 int fs_access(const char *path, int mask) {
     fprintf(stderr, "fs_access(path=\"%s\", mask=0%o)\n", path, mask);
     s3context_t *ctx = GET_PRIVATE_DATA;
+	uint8_t *dir = NULL, *direct = NULL;
+	ssize_t dir_size;
+	if(s3fs_get_object(ctx->s3bucket, path, &dir, 0,0)<0) {
+		fprintf(stderr, "error retrieving object\n");
+		return -EIO;
+	}
+	char *temp_path = strdup(path), *temp_path1 = strdup(path);
+	char *dir_name = strdup(dirname(temp_path)), *base_name = strdup(basename(temp_path1));
+	free(temp_path); free(temp_path1);
+	if((dir_size=s3fs_get_object(ctx->s3bucket, dir_name, &direct, 0,0))<0) {
+		fprintf(stderr, "error retrieving object\n");
+		return -EIO;
+	}
+	int i = 0;
+	s3dirent_t *dirent = (s3dirent_t*)direct;
+	s3dirent_t *dir1 = (s3dirent_t*)dir;
+	for(;i<dir_size/sizeof(s3dirent_t);i++) {
+		if(!strcmp(base_name, dirent[i].name)) {
+			if(dirent[i].type == 'D') {
+				if(dir1[0].metadata.st_mode ==(dir1[0].metadata.st_mode & mask)) {
+					free(dir_name); free(base_name); free(dir1); free(dirent);
+					return 0;
+				}
+			}else {
+				if(dirent[i].metadata.st_mode == (dirent[i].metadata.st_mode & mask)) {
+					free(dir_name); free(base_name); free(dir1); free(dirent);
+					return 0;
+				}
+			}
+		}
+	}
+//we assumed logical and would make the most sense becuase it would match up with 
+//the bits you want. However we could not figure it out in time. 
     return 0;
 }
 
@@ -786,7 +876,12 @@ int fs_access(const char *path, int mask) {
 int fs_ftruncate(const char *path, off_t offset, struct fuse_file_info *fi) {
     fprintf(stderr, "fs_ftruncate(path=\"%s\", offset=%d)\n", path, (int)offset);
     s3context_t *ctx = GET_PRIVATE_DATA;
-    return -EIO;
+	int err = NULL;
+	if((err=fs_truncate(path, offset))!=0) {
+		fprintf(stderr, "error truncating path: fs_ftruncate\n");
+		return -errno;
+	}
+    return 0;
 }
 
 
